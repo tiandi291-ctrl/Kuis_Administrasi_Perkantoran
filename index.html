@@ -1,0 +1,181 @@
+<!-- ... existing code ... -->
+      function App() {
+        const [studentInfo, setStudentInfo] = useState({ name: '', studentClass: '' });
+        const [quizStarted, setQuizStarted] = useState(false);
+        const [quizFinished, setQuizFinished] = useState(false);
+        const [currentIndex, setCurrentIndex] = useState(0);
+        const [selectedOption, setSelectedOption] = useState(null);
+        const [isAnswered, setIsAnswered] = useState(false);
+        const [score, setScore] = useState(0);
+        const [userAnswers, setUserAnswers] = useState([]);
+        const [submitStatus, setSubmitStatus] = useState('idle');
+        const [timeLeft, setTimeLeft] = useState(60);
+        const timerRef = useRef(null);
+
+        const currentQ = QUIZ_QUESTIONS[currentIndex];
+
+        // 1. RUMUS TIMER AUTOMATIC SHIFT (60 Detik / Soal)
+        useEffect(() => {
+          if (quizStarted && !quizFinished && !isAnswered) {
+            setTimeLeft(60);
+            if (timerRef.current) clearInterval(timerRef.current);
+
+            timerRef.current = setInterval(() => {
+              setTimeLeft((prev) => {
+                if (prev <= 1) {
+                  clearInterval(timerRef.current);
+                  // Otomatis pilih -1 (waktu habis)
+                  handleAutoTimeout();
+                  return 0;
+                }
+                return prev - 1;
+              });
+            }, 1000);
+          }
+          return () => { if (timerRef.current) clearInterval(timerRef.current); };
+        }, [quizStarted, quizFinished, currentIndex, isAnswered]);
+
+        // Handler saat waktu habis secara otomatis
+        const handleAutoTimeout = () => {
+          if (isAnswered) return;
+          setSelectedOption(-1);
+          setIsAnswered(true);
+
+          setUserAnswers((prev) => [
+            ...prev,
+            { questionId: currentQ.id, elemen: currentQ.elemen, selected: -1, isCorrect: false }
+          ]);
+
+          // Pindah ke soal berikutnya secara otomatis setelah jeda 1.5 detik
+          setTimeout(() => {
+            if (currentIndex < QUIZ_QUESTIONS.length - 1) {
+              setCurrentIndex((prev) => prev + 1);
+              setSelectedOption(null);
+              setIsAnswered(false);
+            } else {
+              setQuizFinished(true);
+            }
+          }, 1500);
+        };
+
+        const handleStartQuiz = (e) => {
+          e.preventDefault();
+          if (!studentInfo.name.trim() || !studentInfo.studentClass.trim()) return;
+          setQuizStarted(true);
+        };
+
+        // Handler pilihan jawaban dari siswa
+        const handleSelectOption = (index) => {
+          if (isAnswered) return;
+          if (timerRef.current) clearInterval(timerRef.current);
+
+          setSelectedOption(index);
+          setIsAnswered(true);
+
+          const isCorrect = index === currentQ.answer;
+          if (isCorrect) setScore((prev) => prev + 1);
+
+          setUserAnswers((prev) => [
+            ...prev,
+            { questionId: currentQ.id, elemen: currentQ.elemen, selected: index, isCorrect: isCorrect }
+          ]);
+        };
+
+        useEffect(() => {
+          if (quizFinished) {
+            sendResultsToGoogleSheet();
+          }
+        }, [quizFinished]);
+
+        // 2. RUMUS PENGIRIMAN HASIL & REKAP KESALAHAN KE GOOGLE SHEET
+        const sendResultsToGoogleSheet = async () => {
+          setSubmitStatus('submitting');
+          // Rumus Nilai Skala 100
+          const finalScore = Math.round((score / QUIZ_QUESTIONS.length) * 100);
+          
+          // Rumus Ekstraksi Detail Kesalahan
+          const kesalahanList = userAnswers
+            .map((ans, idx) => {
+              if (!ans.isCorrect) {
+                const q = QUIZ_QUESTIONS[idx];
+                return {
+                  no: idx + 1,
+                  elemen: ans.elemen,
+                  jawabanSiswa: ans.selected >= 0 ? q.options[ans.selected] : "Waktu Habis",
+                  kunci: q.options[q.answer]
+                };
+              }
+              return null;
+            })
+            .filter(item => item !== null);
+
+          const payload = {
+            nama: studentInfo.name,
+            kelas: studentInfo.studentClass,
+            skor: finalScore,
+            jumlahBenar: score,
+            jumlahSalah: QUIZ_QUESTIONS.length - score,
+            kesalahan: kesalahanList
+          };
+
+          try {
+            await fetch(GOOGLE_SHEET_WEBHOOK_URL, {
+              method: 'POST',
+              mode: 'no-cors',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+            setSubmitStatus('success');
+          } catch (err) {
+            setSubmitStatus('error');
+          }
+        };
+
+        const handleNextQuestion = () => {
+          if (currentIndex < QUIZ_QUESTIONS.length - 1) {
+            setCurrentIndex((prev) => prev + 1);
+            setSelectedOption(null);
+            setIsAnswered(false);
+          } else {
+            setQuizFinished(true);
+          }
+        };
+
+        const handleRestart = () => {
+          setQuizStarted(false);
+          setQuizFinished(false);
+          setCurrentIndex(0);
+          setSelectedOption(null);
+          setIsAnswered(false);
+          setScore(0);
+          setUserAnswers([]);
+          setTimeLeft(60);
+          setSubmitStatus('idle');
+        };
+
+        // 3. RUMUS GENERATOR EXCEL / CSV BACKUP
+        const handleExportCSV = () => {
+          const finalScore = Math.round((score / QUIZ_QUESTIONS.length) * 100);
+          let csvContent = "data:text/csv;charset=utf-8,";
+          csvContent += "Nama Siswa,Kelas,Tanggal,Total Skor,Jumlah Benar,Jumlah Salah\n";
+          csvContent += `"${studentInfo.name}","${studentInfo.studentClass}","${new Date().toLocaleString('id-ID')}",${finalScore},${score},${QUIZ_QUESTIONS.length - score}\n\n`;
+          csvContent += "No,Elemen Materi,Status Jawaban,Jawaban Siswa,Kunci Jawaban\n";
+          userAnswers.forEach((ans, idx) => {
+            const q = QUIZ_QUESTIONS[idx];
+            const statusStr = ans.isCorrect ? "BENAR" : (ans.selected === -1 ? "WAKTU HABIS" : "SALAH");
+            const userChoice = ans.selected >= 0 ? `"${q.options[ans.selected]}"` : "Tidak Dijawab";
+            csvContent += `${idx + 1},"${ans.elemen}",${statusStr},${userChoice},"${q.options[q.answer]}"\n`;
+          });
+          const link = document.createElement("a");
+          link.href = encodeURI(csvContent);
+          link.download = `Hasil_Kuis_${studentInfo.name.replace(/\s+/g, '_')}.csv`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        };
+
+        // Rumus perhitungan skor
+        const totalScoreScaled = Math.round((score / QUIZ_QUESTIONS.length) * 100);
+
+        return (
+<!-- ... existing code ... -->
